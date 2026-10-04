@@ -12,6 +12,8 @@ mod data_backup;
 mod reminder_scheduler;
 mod screen_time_tracker;
 mod snooze_tracker;
+#[cfg(target_os = "linux")]
+mod wayland_reminder;
 use crypto::{
     ensure_install_data, get_config_bool, get_config_string, get_install_date,
     get_license_info, get_reminder_settings, get_trial_info,
@@ -240,6 +242,10 @@ pub fn run() {
             greet,
             check_minimized_argument,
             reminder_scheduler::skip_reminder,
+            reminder_scheduler::preview_reminder,
+            reminder_scheduler::get_reminder_status,
+            reminder_scheduler::claim_reminder_audio,
+            reminder_scheduler::dismiss_reminder_preview,
             reminder_scheduler::refresh_reminder_scheduler_settings,
             reminder_scheduler::show_reminder_now,
             reminder_scheduler::get_next_reminder_info,
@@ -261,6 +267,13 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                app.state::<Arc<ReminderScheduler>>().shutdown();
+                #[cfg(target_os = "linux")]
+                wayland_reminder::shutdown();
+            }
+        });
 }
