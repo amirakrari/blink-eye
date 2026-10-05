@@ -20,6 +20,16 @@ It provides customizable timers, full-screen popups, audio mute functionality, a
 - Audio mute during reminders to enhance focus. [Soon]
 - Workday setup, can specify worktime when reminders should show. [Soon]
 
+## Dashboard and system tray
+
+Closing the dashboard hides it to the system tray; Blink Eye keeps running and
+reminders continue. Choose **Dashboard** from the tray menu to reopen it.
+Choose **Quit** to exit Blink Eye, or **Relaunch** to restart it.
+
+Launching with `--minimized` starts with the dashboard hidden at its normal size.
+Open it through the tray menu when needed; launching without this argument shows
+the dashboard normally. Tray click behavior depends on the desktop's tray host.
+
 Quick access links:
   - [Donate](https://www.buymeacoffee.com/nomandhoni)
   - [GitHub Repository](https://github.com/nomandhoni-cs/blink-eye)

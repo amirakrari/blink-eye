@@ -78,6 +78,16 @@ pub fn run() {
     };
 
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    if let Err(error) = window.hide() {
+                        eprintln!("[Window] Failed to hide dashboard: {error}");
+                    }
+                }
+            }
+        })
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -177,6 +187,9 @@ pub fn run() {
                         // Focus the main window on left click
                         let app_handle = tray.app_handle();
                         if let Some(window) = app_handle.get_webview_window("main") {
+                            if let Err(error) = window.show() {
+                                eprintln!("[Tray] Failed to show dashboard: {error}");
+                            }
                             let _ = window.unminimize();
                             let _ = window.set_skip_taskbar(false);
                             let _ = window.set_focus();
@@ -195,6 +208,9 @@ pub fn run() {
                     }
                     "dashboard" => {
                         if let Some(window) = app.get_webview_window("main") {
+                            if let Err(error) = window.show() {
+                                eprintln!("[Tray] Failed to show dashboard: {error}");
+                            }
                             let _ = window.unminimize();
                             let _ = window.set_skip_taskbar(false);
                             let _ = window.set_focus();
@@ -244,6 +260,14 @@ pub fn run() {
                     }
                 }
             });
+
+            if !std::env::args().any(|arg| arg == "--minimized") {
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Err(error) = window.show() {
+                        eprintln!("[Setup] Failed to show dashboard: {error}");
+                    }
+                }
+            }
 
             Ok(())
         })
