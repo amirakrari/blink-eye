@@ -1,0 +1,5 @@
+#!/bin/sh
+# Local CachyOS/Niri defaults; callers can override either variable.
+export GDK_BACKEND="${GDK_BACKEND:-x11}"
+export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
+exec /usr/bin/Blink-Eye "$@"

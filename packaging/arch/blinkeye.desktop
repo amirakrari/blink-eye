@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Blink Eye (native)
+Comment=Break reminders using native system libraries
+Exec=blinkeye
+Icon=Blink-Eye
+Terminal=false
+Categories=Office;

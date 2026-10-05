@@ -96,6 +96,9 @@ Contributions for improving the dashboard, enhancing customizability, and adding
 
 ## Application Setup
 
+For a checkout-local native Arch Linux package, see
+[the Arch build and installation guide](packaging/arch/README.md).
+
 ### Prerequisites
 
 1. **Tauri** (for building the desktop app)

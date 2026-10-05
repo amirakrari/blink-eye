@@ -1,0 +1,45 @@
+pkgname=blinkeye
+pkgver=2.8.1
+pkgrel=1
+pkgdesc='Blink Eye break reminders using native Arch libraries'
+arch=('x86_64')
+url='https://github.com/nomandhoni-cs/blink-eye'
+license=('custom:Blink-Eye')
+depends=('glibc' 'libgcc' 'xz' 'bzip2' 'gtk3' 'glib2' 'cairo' 'gdk-pixbuf2'
+         'webkit2gtk-4.1' 'libsoup3' 'libappindicator'
+         'gst-plugins-base' 'gst-plugins-good' 'gst-libav')
+makedepends=('rust' 'bun' 'pkgconf')
+provides=('blink-eye')
+conflicts=('blink-eye' 'blink-eye-bin' 'blinkeye-bin')
+# GCC LTO input leaves unresolved SQLite symbols in SQLx's Rust macro library.
+options=('!strip' '!debug' '!lto')
+source=('blinkeye' 'blinkeye.desktop')
+sha256sums=('25af1a2f80cb54f5962c3db26927b8cb2c9039d1900e0074a6613c6ba8bcb577'
+            '5dab80258c5357acfece9479a131824fa662c70a302b0991b8681fbcbc3acaf3')
+
+build() {
+    cd "${startdir}/../.."
+    bun install --frozen-lockfile
+    bun run tauri build --no-bundle --ci
+}
+
+package() {
+    local repo_root="${startdir}/../.."
+    install -Dm755 "${repo_root}/src-tauri/target/release/Blink-Eye" \
+        "${pkgdir}/usr/bin/Blink-Eye"
+    install -Dm644 "${repo_root}/LICENSE" \
+        "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    install -Dm644 "${repo_root}/src-tauri/assets/done.mp3" \
+        "${pkgdir}/usr/lib/Blink Eye/done.mp3"
+    install -Dm644 "${repo_root}/src-tauri/assets/before_alert_sound.mp3" \
+        "${pkgdir}/usr/lib/Blink Eye/before_alert_sound.mp3"
+    install -Dm644 "${repo_root}/src-tauri/icons/32x32.png" \
+        "${pkgdir}/usr/share/icons/hicolor/32x32/apps/Blink-Eye.png"
+    install -Dm644 "${repo_root}/src-tauri/icons/128x128.png" \
+        "${pkgdir}/usr/share/icons/hicolor/128x128/apps/Blink-Eye.png"
+    install -Dm644 "${repo_root}/src-tauri/icons/128x128@2x.png" \
+        "${pkgdir}/usr/share/icons/hicolor/256x256/apps/Blink-Eye.png"
+    install -Dm755 "${srcdir}/blinkeye" "${pkgdir}/usr/bin/blinkeye"
+    install -Dm644 "${srcdir}/blinkeye.desktop" \
+        "${pkgdir}/usr/share/applications/blinkeye.desktop"
+}
