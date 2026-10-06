@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Blink Eye (Wayland)
+Comment=Break reminders using native Wayland and a separate profile
+Exec=blinkeye-wayland
+Icon=blinkeye-wayland
+Terminal=false
+Categories=Office;

@@ -1,0 +1,45 @@
+pkgname=blinkeye-wayland
+pkgver=2.8.1
+pkgrel=1
+pkgdesc='Blink Eye break reminders with a separate native Wayland profile'
+arch=('x86_64')
+url='https://github.com/nomandhoni-cs/blink-eye'
+license=('custom:Blink-Eye')
+depends=('glibc' 'libgcc' 'xz' 'bzip2' 'gtk3' 'glib2' 'cairo' 'gdk-pixbuf2'
+         'webkit2gtk-4.1' 'libsoup3' 'libappindicator'
+         'gst-plugins-base' 'gst-plugins-good' 'gst-libav')
+makedepends=('rust' 'bun' 'pkgconf')
+# GCC LTO input leaves unresolved SQLite symbols in SQLx's Rust macro library.
+options=('!strip' '!debug' '!lto')
+source=('blinkeye-wayland' 'blinkeye-wayland.desktop' 'tauri.wayland.conf.json')
+
+build() {
+    cd "${startdir}/../.."
+    bun install --frozen-lockfile
+    bun run tauri build --no-bundle --ci --config "${srcdir}/tauri.wayland.conf.json"
+}
+
+package() {
+    local repo_root="${startdir}/../.."
+    install -Dm755 "${repo_root}/src-tauri/target/release/Blink-Eye" \
+        "${pkgdir}/usr/bin/Blink-Eye-Wayland"
+    install -Dm644 "${repo_root}/LICENSE" \
+        "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+    # Tauri 2.10.2 resolves Linux resources using package_info.name (productName).
+    install -Dm644 "${repo_root}/src-tauri/assets/done.mp3" \
+        "${pkgdir}/usr/lib/Blink Eye Wayland/done.mp3"
+    install -Dm644 "${repo_root}/src-tauri/assets/before_alert_sound.mp3" \
+        "${pkgdir}/usr/lib/Blink Eye Wayland/before_alert_sound.mp3"
+    install -Dm644 "${repo_root}/src-tauri/icons/32x32.png" \
+        "${pkgdir}/usr/share/icons/hicolor/32x32/apps/blinkeye-wayland.png"
+    install -Dm644 "${repo_root}/src-tauri/icons/128x128.png" \
+        "${pkgdir}/usr/share/icons/hicolor/128x128/apps/blinkeye-wayland.png"
+    install -Dm644 "${repo_root}/src-tauri/icons/128x128@2x.png" \
+        "${pkgdir}/usr/share/icons/hicolor/256x256/apps/blinkeye-wayland.png"
+    install -Dm755 "${srcdir}/blinkeye-wayland" "${pkgdir}/usr/bin/blinkeye-wayland"
+    install -Dm644 "${srcdir}/blinkeye-wayland.desktop" \
+        "${pkgdir}/usr/share/applications/blinkeye-wayland.desktop"
+}
+sha256sums=('04251ef145e6ea40e9586a132132d6937bfe3da2bd10c573d65dad470e22e9f1'
+            '2391168923389ee59b5f8bef7cf73bab5234564138b686f0bbc432ade51aa442'
+            'fc93fdbb12a3eeec87cd35c50003f12bf7899d5de0677e5cb1b9334aa5e2da5d')
