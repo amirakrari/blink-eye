@@ -25,6 +25,41 @@ X11/XWayland retain standard fullscreen presentation without this Wayland
 inhibition claim. Logs report backend, output count and grab result without
 reminder text, keyboard input, license values or monitor serials.
 
+## Launch backend and multi-monitor coverage
+
+A Wayland desktop session does not imply that Blink Eye uses native Wayland.
+When the launcher leaves `GDK_BACKEND` unset,
+GTK3 probes its supported backends; the tested Linux GTK3 build prefers Wayland
+and falls back to X11 when it cannot open the Wayland display. GTK owns explicit
+backend names, ordered lists and wildcard semantics. Do not infer availability
+from `XDG_SESSION_TYPE` or override the caller's choice.
+
+To request native Wayland explicitly for diagnosis:
+
+```sh
+GDK_BACKEND=wayland /path/to/Blink-Eye
+```
+
+Check for `backend=wayland-gtk3` in the reminder log, then preview a break and
+confirm that each selected physical display shows its own fullscreen overlay.
+`outputs=2` alone proves that two windows were created, not that they occupy
+different displays. A package launcher may override the environment; check its
+actual behavior rather than assuming that the command above applies to it.
+
+On a two-output Niri/XWayland setup, a launcher defaulting to `GDK_BACKEND=x11`
+created two fullscreen reminder windows on the same focused output. Both
+monitors were enumerated, multi-monitor mode was enabled, and the trial was
+active. Running the identical binary and copied settings with
+`GDK_BACKEND=wayland` covered the two distinct outputs. Native preview and
+scheduled-break expiry were also verified in a separately named local Wayland
+installation with an independent profile.
+
+That XWayland window manager did not advertise `_NET_WM_FULLSCREEN_MONITORS`.
+An explicit GTK fullscreen-monitor request still stacked both X11 windows and
+was not retained as a fix. Use native Wayland for this configuration; do not
+interpret the standard X11 fallback as guaranteed multi-output coverage.
+This observation does not establish behavior on other X11 window managers.
+
 ## Lifetime, previews and recovery
 
 Rust owns the monotonic deadline, even if a reminder renderer stops responding or
