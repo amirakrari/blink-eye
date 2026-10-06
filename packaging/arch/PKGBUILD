@@ -14,7 +14,7 @@ conflicts=('blink-eye' 'blink-eye-bin' 'blinkeye-bin')
 # GCC LTO input leaves unresolved SQLite symbols in SQLx's Rust macro library.
 options=('!strip' '!debug' '!lto')
 source=('blinkeye' 'blinkeye.desktop')
-sha256sums=('25af1a2f80cb54f5962c3db26927b8cb2c9039d1900e0074a6613c6ba8bcb577'
+sha256sums=('6882fec347ae61225bf0faf1266f85738d9e0126127272016f2efa13d2027946'
             '5dab80258c5357acfece9479a131824fa662c70a302b0991b8681fbcbc3acaf3')
 
 build() {

@@ -1,4 +1,4 @@
 #!/bin/sh
 # Let GTK choose an available backend and preserve explicit GDK_BACKEND overrides.
 export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
-exec /usr/bin/Blink-Eye "$@"
+exec /usr/bin/Blink-Eye-Wayland "$@"
