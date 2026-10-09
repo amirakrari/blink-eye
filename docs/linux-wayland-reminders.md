@@ -9,6 +9,10 @@ Every selected output shows the synchronized timer, reminder message and guarded
 Skip (or preview dismissal). Only the primary owns todos and audio; Rust grants
 one audio claim per session even when a surviving output becomes primary.
 
+A refused early audio claim can be retried on a later status update in the final
+second. An accepted claim is consumed once, including if its resource cannot be
+loaded or playback fails; status updates do not duplicate the sound.
+
 Timer and message sizes are capped at the original large-display sizes and
 shrink with the logical viewport. Numeric sizing also accounts for digit count,
 leaving padding inside the circle. Resizing does not restart the backend timer.

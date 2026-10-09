@@ -57,6 +57,8 @@ const ReminderOverlay: React.FC<{ isPremium: boolean }> = ({ isPremium }) => {
   const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }));
   const [canSnooze, setCanSnooze] = useState(false);
   const audioPlayed = useRef(false);
+  const audioClaimPending = useRef(false);
+  const mounted = useRef(false);
   const timeLeft = Math.ceil((status?.remainingMs ?? 0) / 1000);
   const reminderDuration = status?.durationSecs ?? 20;
   const reminderText = status?.reminderText ?? "";
@@ -76,6 +78,11 @@ const ReminderOverlay: React.FC<{ isPremium: boolean }> = ({ isPremium }) => {
     (viewport.width - 32 - 8 - barSuffixFontSize) / (timerDigits * 0.8),
   );
   const timerKey = `${viewport.width}-${viewport.height}-${timerDigits}`;
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   useEffect(() => {
     const resize = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
@@ -154,16 +161,20 @@ const ReminderOverlay: React.FC<{ isPremium: boolean }> = ({ isPremium }) => {
   }, [isPreview, sessionId]);
 
   useEffect(() => {
-    if (isLoading || timeLeft > 1 || !isPremium || !isPrimary || audioPlayed.current) return;
-    audioPlayed.current = true;
+    if (isLoading || timeLeft > 1 || !isPremium || !isPrimary
+      || audioPlayed.current || audioClaimPending.current) return;
+    audioClaimPending.current = true;
     const play = async () => {
       try {
-        if (!await invoke<boolean>("claim_reminder_audio", { sessionId })) return;
+        if (!await invoke<boolean>("claim_reminder_audio", { sessionId }) || !mounted.current) return;
+        audioPlayed.current = true;
         const filePath = await path.join(await path.resourceDir(), "done.mp3");
         // The native asset protocol can misidentify headerless MP3 as text/html.
         const response = await fetch(convertFileSrc(filePath));
         if (!response.ok) throw new Error(`Reminder audio: ${response.status}`);
-        const url = URL.createObjectURL(new Blob([await response.arrayBuffer()], { type: "audio/mpeg" }));
+        const bytes = await response.arrayBuffer();
+        if (!mounted.current) return;
+        const url = URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" }));
         const audio = new Audio(url);
         const release = () => URL.revokeObjectURL(url);
         audio.addEventListener("ended", release, { once: true });
@@ -176,10 +187,12 @@ const ReminderOverlay: React.FC<{ isPremium: boolean }> = ({ isPremium }) => {
         }
       } catch (error) {
         console.error("Error playing reminder audio:", error);
+      } finally {
+        audioClaimPending.current = false;
       }
     };
     play();
-  }, [timeLeft, isPremium, isPrimary, isLoading, sessionId]);
+  }, [timeLeft, status?.remainingMs, isPremium, isPrimary, isLoading, sessionId]);
 
   const progressPercentage =
     reminderDuration > 0 ? (timeLeft / reminderDuration) * 100 : 0;
