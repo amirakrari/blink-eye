@@ -265,6 +265,10 @@ invoke("get_config_bool", { key: string, default_value: boolean }) → boolean
 
 Reads a boolean value from the `config` table in `appconfig.db`. Generic — accepts any key.
 
+Startup prepares the canonical AppData configuration before scheduler or IPC use.
+On the first unmarked upgrade, a valid `isMultiMonitorEnabled` value from the old
+AppConfig database is imported once. The legacy file is never changed.
+
 **Parameters:**
 
 | Name | Type | Description |
@@ -327,6 +331,11 @@ Sets a value for any key in the `config` table of `appconfig.db`. Upserts (inser
 
 Despite the name, this is the **generic write path** for appconfig.db — used for any setting, not only reminder-related ones.
 
+For `isMultiMonitorEnabled`, `value` must be `"true"` or `"false"`. The choice and
+the internal one-time migration marker are saved in the same transaction, so a
+later retry of a failed legacy import cannot overwrite this new choice. Other
+keys retain the generic upsert behavior.
+
 **Reminders/scheduling keys:**
 - `blinkEyeReminderInterval` — break interval in minutes
 - `blinkEyeReminderDuration` — break duration in seconds
@@ -344,6 +353,7 @@ Despite the name, this is the **generic write path** for appconfig.db — used f
 
 **Other keys:**
 - `usageTimeLimit` — daily usage limit in hours (chart)
+- `isMultiMonitorEnabled` — saved monitor selection (`"true"` / `"false"`)
 
 **Parameters:**
 - `key` — Config key string
@@ -352,6 +362,9 @@ Despite the name, this is the **generic write path** for appconfig.db — used f
 **Returns:** `void`
 
 > ⚠️ After updating `blinkEyeReminderInterval`, `blinkEyeReminderDuration`, or `blinkEyeReminderScreenText`, also call `refresh_reminder_scheduler_settings` so the scheduler picks up the changes without restarting.
+
+Also refresh the scheduler after saving `isMultiMonitorEnabled`; it applies to
+the next session, without changing the active session's deadline.
 
 ---
 

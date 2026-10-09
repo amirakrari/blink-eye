@@ -60,6 +60,23 @@ was not retained as a fix. Use native Wayland for this configuration; do not
 interpret the standard X11 fallback as guaranteed multi-output coverage.
 This observation does not establish behavior on other X11 window managers.
 
+## Preserving an existing monitor preference
+
+Your saved monitor selection is retained when upgrading from the earlier UI
+storage path. Before reminders start, Blink Eye reads the old AppConfig
+`appconfig.db` without modifying it and imports only a valid
+`isMultiMonitorEnabled` boolean into the canonical AppData configuration.
+If both stores contain different values on this first upgrade, the old UI
+selection wins. License, trial and todo data are not imported.
+
+The choice and a one-time completion marker are committed together. After that,
+new dashboard choices remain authoritative, including after restarting.
+Missing or identical legacy storage preserves the canonical choice. An invalid
+or unreadable legacy value preserves the canonical setting and leaves the
+import incomplete; saving a valid monitor choice in the dashboard completes it.
+Neither database is deleted or replaced. Downgrade clients ignore the marker;
+edits made through the old UI after downgrading are not automatically reimported.
+
 ## Lifetime, previews and recovery
 
 Rust owns the monotonic deadline, even if a reminder renderer stops responding or

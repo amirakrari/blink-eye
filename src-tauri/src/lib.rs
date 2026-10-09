@@ -137,6 +137,11 @@ pub fn run() {
             // Create timer channel and scheduler
             let (tray_tx, mut tray_rx) = mpsc::channel::<TrayUpdate>(32);
             let reminder_scheduler = ReminderScheduler::new(app_data_dir, tray_tx);
+            let legacy_config = app.path().app_config_dir()?.join("appconfig.db");
+            // Setup must finish migration and settings load before scheduler ticks or frontend IPC.
+            if let Err(error) = tauri::async_runtime::block_on(reminder_scheduler.prepare_settings(&legacy_config)) {
+                eprintln!("[ReminderScheduler] Startup settings preparation failed: {error}");
+            }
             app.manage(reminder_scheduler.clone());
             reminder_scheduler.start(app.handle().clone());
 

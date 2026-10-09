@@ -8,7 +8,7 @@ use sqlx::{
 use std::{
     collections::HashMap,
     num::NonZeroU32,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, Mutex as StateMutex, MutexGuard},
 };
@@ -33,6 +33,9 @@ pub struct TrayUpdate {
 const SCHEDULER_TICK_SECS: u64 = 1;
 /// How often settings are re-read from the database, in seconds.
 const CONFIG_REFRESH_SECS: u64 = 30;
+
+const MULTI_MONITOR_KEY: &str = "isMultiMonitorEnabled";
+const MULTI_MONITOR_MIGRATION_KEY: &str = "multiMonitorPreferenceMigrationVersion";
 /// Seconds before a break when a pre-alert notification is shown.
 const BEFORE_ALERT_SECONDS: u64 = 15;
 /// Default interval between breaks, in minutes.
@@ -325,13 +328,26 @@ impl ReminderScheduler {
         *count += 1;
     }
 
-    /// Spawns the scheduler's tick loop as an async task. Loads initial settings then ticks every `SCHEDULER_TICK_SECS`.
+    /// Prepares canonical config and imports the released UI preference before settings or IPC are used.
+    pub(crate) async fn prepare_settings(&self, legacy_path: &Path) -> Result<(), String> {
+        let pool = self.open_sqlite_pool("appconfig.db", true).await?;
+        ensure_app_config_defaults(&pool).await?;
+        if let Err(error) = migrate_multi_monitor_preference(
+            &pool,
+            &self.app_data_dir.join("appconfig.db"),
+            legacy_path,
+        )
+        .await
+        {
+            eprintln!("[ReminderScheduler] Multi-monitor migration deferred: {error}");
+        }
+        pool.close().await;
+        self.refresh_settings().await
+    }
+
+    /// Spawns the tick loop after awaited startup settings preparation.
     pub fn start(self: Arc<Self>, app_handle: AppHandle) {
         tauri::async_runtime::spawn(async move {
-            if let Err(error) = self.refresh_settings().await {
-                eprintln!("[ReminderScheduler] Initial settings load failed: {error}");
-            }
-
             let mut ticker = interval(Duration::from_secs(SCHEDULER_TICK_SECS));
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -751,7 +767,7 @@ impl ReminderScheduler {
         }
 
         settings.is_multi_monitor_enabled =
-            read_config_bool(&app_pool, "isMultiMonitorEnabled", false).await;
+            read_config_bool(&app_pool, MULTI_MONITOR_KEY, false).await;
         settings.is_strict_mode = read_config_bool(&app_pool, "usingStrictMode", false).await;
         settings.use_circle_timer =
             read_config_bool(&app_pool, "useCircleProgressTimerStyle", true).await;
@@ -1324,6 +1340,116 @@ const BACKGROUND_STYLE_TO_ENTRY: &[(&str, &str)] = &[
     ("canvasShapes", "reminder-canvas.html"),
 ];
 
+/// The writer lock precedes the marker read, so a concurrent explicit save wins.
+async fn migrate_multi_monitor_preference(
+    pool: &Pool<Sqlite>,
+    canonical_path: &Path,
+    legacy_path: &Path,
+) -> Result<(), String> {
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|_| "Could not begin canonical config migration")?;
+    migrate_multi_monitor_transaction(&mut transaction, canonical_path, legacy_path).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| "Could not commit canonical config migration".into())
+}
+
+async fn migrate_multi_monitor_transaction(
+    connection: &mut sqlx::SqliteConnection,
+    canonical_path: &Path,
+    legacy_path: &Path,
+) -> Result<(), String> {
+    let marker: Option<(String,)> = sqlx::query_as("SELECT value FROM config WHERE key = ?")
+        .bind(MULTI_MONITOR_MIGRATION_KEY)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|_| "Could not read canonical migration marker")?;
+    if marker.is_some_and(|(value,)| value == "1") {
+        return Ok(());
+    }
+
+    let value = if canonical_path == legacy_path
+        || !legacy_path
+            .try_exists()
+            .map_err(|_| "Could not inspect legacy config")?
+        || std::fs::canonicalize(canonical_path)
+            .map_err(|_| "Could not resolve canonical config")?
+            == std::fs::canonicalize(legacy_path).map_err(|_| "Could not resolve legacy config")?
+    {
+        None
+    } else {
+        let legacy = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(legacy_path)
+                    .read_only(true),
+            )
+            .await
+            .map_err(|_| "Could not open legacy config read-only")?;
+        let row: Result<Option<(String,)>, _> =
+            sqlx::query_as("SELECT value FROM config WHERE key = ?")
+                .bind(MULTI_MONITOR_KEY)
+                .fetch_optional(&legacy)
+                .await;
+        legacy.close().await;
+        match row.map_err(|_| "Could not read legacy monitor preference")? {
+            Some((value,)) => Some(
+                value
+                    .parse::<bool>()
+                    .map_err(|_| "Invalid legacy monitor preference")?,
+            ),
+            None => None,
+        }
+    };
+    write_multi_monitor_choice(connection, value).await
+}
+
+/// Saves a canonical user choice and seals legacy import in the same transaction.
+pub(crate) async fn save_multi_monitor_preference(
+    pool: &Pool<Sqlite>,
+    value: bool,
+) -> Result<(), String> {
+    let mut transaction = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(|error| error.to_string())?;
+    write_multi_monitor_choice(&mut transaction, Some(value)).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+async fn write_multi_monitor_choice(
+    connection: &mut sqlx::SqliteConnection,
+    value: Option<bool>,
+) -> Result<(), String> {
+    if let Some(value) = value {
+        sqlx::query(
+            "INSERT INTO config (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(MULTI_MONITOR_KEY)
+        .bind(if value { "true" } else { "false" })
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| "Could not write canonical monitor preference")?;
+    }
+    sqlx::query(
+        "INSERT INTO config (key, value) VALUES (?, '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(MULTI_MONITOR_MIGRATION_KEY)
+    .execute(connection)
+    .await
+    .map_err(|_| "Could not write canonical migration marker")?;
+    Ok(())
+}
+
 /// Creates the `config` table in `appconfig.db` and inserts default values if missing.
 async fn ensure_app_config_defaults(pool: &Pool<Sqlite>) -> Result<(), String> {
     sqlx::query("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
@@ -1741,6 +1867,492 @@ pub async fn get_next_reminder_info(
 mod tests {
     use super::{is_inside_workday_window, ReminderSettings, WorkdayHours};
     use std::collections::HashMap;
+
+    struct ConfigProfile(std::path::PathBuf);
+
+    impl ConfigProfile {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "blink-eye-migration-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(root.join("config")).unwrap();
+            std::fs::create_dir_all(root.join("data")).unwrap();
+            Self(root)
+        }
+
+        fn scheduler(&self) -> std::sync::Arc<super::ReminderScheduler> {
+            let (tx, _rx) = tokio::sync::mpsc::channel(1);
+            super::ReminderScheduler::new(self.0.join("data"), tx)
+        }
+
+        fn legacy_path(&self) -> std::path::PathBuf {
+            self.0.join("config/appconfig.db")
+        }
+
+        fn canonical_path(&self) -> std::path::PathBuf {
+            self.0.join("data/appconfig.db")
+        }
+
+        async fn canonical(&self, value: &str) -> sqlx::Pool<sqlx::Sqlite> {
+            let pool = self
+                .scheduler()
+                .open_sqlite_pool("appconfig.db", true)
+                .await
+                .unwrap();
+            super::ensure_app_config_defaults(&pool).await.unwrap();
+            sqlx::query("UPDATE config SET value = ? WHERE key = 'isMultiMonitorEnabled'")
+                .bind(value)
+                .execute(&pool)
+                .await
+                .unwrap();
+            pool
+        }
+
+        async fn migrate(&self, pool: &sqlx::Pool<sqlx::Sqlite>) -> Result<(), String> {
+            super::migrate_multi_monitor_preference(
+                pool,
+                &self.canonical_path(),
+                &self.legacy_path(),
+            )
+            .await
+        }
+
+        async fn legacy(&self, value: &str) -> sqlx::Pool<sqlx::Sqlite> {
+            let pool = super::SqlitePoolOptions::new()
+                .max_connections(2)
+                .connect_with(
+                    super::SqliteConnectOptions::new()
+                        .filename(self.legacy_path())
+                        .create_if_missing(true),
+                )
+                .await
+                .unwrap();
+            super::ensure_app_config_defaults(&pool).await.unwrap();
+            sqlx::query("UPDATE config SET value = ? WHERE key = 'isMultiMonitorEnabled'")
+                .bind(value)
+                .execute(&pool)
+                .await
+                .unwrap();
+            pool
+        }
+    }
+
+    impl Drop for ConfigProfile {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_monitor_migration_preserves_released_ui_choice_at_startup() {
+        // Given separate old SQL-plugin and canonical stores with conflicting values.
+        let profile = ConfigProfile::new();
+        let legacy = profile.legacy("true").await;
+        let scheduler = profile.scheduler();
+        let canonical = scheduler
+            .open_sqlite_pool("appconfig.db", true)
+            .await
+            .unwrap();
+        super::ensure_app_config_defaults(&canonical).await.unwrap();
+
+        // When the existing startup settings path loads the profile.
+        scheduler
+            .prepare_settings(&profile.legacy_path())
+            .await
+            .unwrap();
+
+        // Then the released UI's saved choice must be the scheduler's choice.
+        let observed = scheduler.state().unwrap().settings.is_multi_monitor_enabled;
+        assert_eq!(
+            observed, true,
+            "released UI=true, canonical default=false; startup must retain the UI choice"
+        );
+        canonical.close().await;
+        legacy.close().await;
+    }
+
+    async fn monitor_choice(pool: &sqlx::Pool<sqlx::Sqlite>) -> (String, Option<String>) {
+        let (value,): (String,) =
+            sqlx::query_as("SELECT value FROM config WHERE key = 'isMultiMonitorEnabled'")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let marker: Option<(String,)> = sqlx::query_as("SELECT value FROM config WHERE key = ?")
+            .bind(super::MULTI_MONITOR_MIGRATION_KEY)
+            .fetch_optional(pool)
+            .await
+            .unwrap();
+        (value, marker.map(|(value,)| value))
+    }
+
+    #[tokio::test]
+    async fn multi_monitor_migration_imports_both_booleans_without_touching_other_data() {
+        for (old, current) in [("true", "false"), ("false", "true")] {
+            // Given conflicting choices and unrelated canonical and legacy records.
+            let profile = ConfigProfile::new();
+            let legacy = profile.legacy(old).await;
+            let canonical = profile.canonical(current).await;
+            for pool in [&legacy, &canonical] {
+                sqlx::raw_sql(
+                    "INSERT INTO config VALUES ('unrelated-setting', 'unchanged');
+                     CREATE TABLE unrelated_data (license TEXT, trial TEXT, todo TEXT);
+                     INSERT INTO unrelated_data VALUES ('license', 'trial', 'todo');",
+                )
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            let before: Vec<(String, Option<String>)> =
+                sqlx::query_as("SELECT key, value FROM config ORDER BY key")
+                    .fetch_all(&canonical)
+                    .await
+                    .unwrap();
+            legacy.close().await;
+            let legacy_bytes = std::fs::read(profile.legacy_path()).unwrap();
+            let mut permissions = std::fs::metadata(profile.legacy_path())
+                .unwrap()
+                .permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(profile.legacy_path(), permissions).unwrap();
+
+            // When importing from a read-only legacy database and restarting.
+            profile.migrate(&canonical).await.unwrap();
+            canonical.close().await;
+            let canonical = profile
+                .scheduler()
+                .open_sqlite_pool("appconfig.db", false)
+                .await
+                .unwrap();
+            profile.migrate(&canonical).await.unwrap();
+
+            // Then only the canonical preference and marker change.
+            assert_eq!(
+                monitor_choice(&canonical).await,
+                (old.into(), Some("1".into()))
+            );
+            let after: Vec<(String, Option<String>)> =
+                sqlx::query_as("SELECT key, value FROM config ORDER BY key")
+                    .fetch_all(&canonical)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                before
+                    .into_iter()
+                    .filter(|(key, _)| key != super::MULTI_MONITOR_KEY)
+                    .collect::<Vec<_>>(),
+                after
+                    .into_iter()
+                    .filter(|(key, _)| {
+                        key != super::MULTI_MONITOR_KEY && key != super::MULTI_MONITOR_MIGRATION_KEY
+                    })
+                    .collect::<Vec<_>>()
+            );
+            let unrelated: (String, String, String) =
+                sqlx::query_as("SELECT license, trial, todo FROM unrelated_data")
+                    .fetch_one(&canonical)
+                    .await
+                    .unwrap();
+            assert_eq!(unrelated, ("license".into(), "trial".into(), "todo".into()));
+            assert_eq!(std::fs::read(profile.legacy_path()).unwrap(), legacy_bytes);
+            let scheduler = profile.scheduler();
+            scheduler.refresh_settings().await.unwrap();
+            assert_eq!(
+                scheduler.state().unwrap().settings.is_multi_monitor_enabled,
+                old == "true"
+            );
+            canonical.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_monitor_migration_preserves_canonical_when_source_is_absent_or_same() {
+        for source in ["missing", "missing-key", "same"] {
+            // Given a canonical choice and no distinct old preference.
+            let profile = ConfigProfile::new();
+            let canonical = profile.canonical("true").await;
+            if source == "missing-key" {
+                let legacy = profile.legacy("false").await;
+                sqlx::query("DELETE FROM config WHERE key = 'isMultiMonitorEnabled'")
+                    .execute(&legacy)
+                    .await
+                    .unwrap();
+                legacy.close().await;
+            }
+            let legacy_path = if source == "same" {
+                profile.canonical_path()
+            } else {
+                profile.legacy_path()
+            };
+
+            // When startup attempts migration.
+            super::migrate_multi_monitor_preference(
+                &canonical,
+                &profile.canonical_path(),
+                &legacy_path,
+            )
+            .await
+            .unwrap();
+
+            // Then completion preserves the canonical choice without creating a source.
+            assert_eq!(
+                monitor_choice(&canonical).await,
+                ("true".into(), Some("1".into()))
+            );
+            if source == "missing" {
+                assert!(!profile.legacy_path().exists());
+            }
+            canonical.close().await;
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn multi_monitor_migration_preserves_canonical_when_source_aliases_same_file() {
+        // Given distinct resolver paths that name the same database.
+        let profile = ConfigProfile::new();
+        let canonical = profile.canonical("true").await;
+        std::os::unix::fs::symlink(profile.canonical_path(), profile.legacy_path()).unwrap();
+
+        // When startup compares the actual files.
+        profile.migrate(&canonical).await.unwrap();
+
+        // Then the canonical value is preserved and import is complete.
+        assert_eq!(
+            monitor_choice(&canonical).await,
+            ("true".into(), Some("1".into()))
+        );
+        canonical.close().await;
+    }
+
+    #[tokio::test]
+    async fn multi_monitor_migration_leaves_invalid_or_unreadable_source_unmarked() {
+        for source in [
+            "TRUE",
+            "1",
+            "",
+            " true ",
+            "null",
+            "corrupt",
+            "no-table",
+            "directory",
+        ] {
+            // Given malformed values or a database that cannot supply the preference.
+            let profile = ConfigProfile::new();
+            let canonical = profile.canonical("true").await;
+            match source {
+                "corrupt" => {
+                    std::fs::write(profile.legacy_path(), b"not a SQLite database").unwrap()
+                }
+                "directory" => std::fs::create_dir(profile.legacy_path()).unwrap(),
+                _ => {
+                    let legacy = profile.legacy(source).await;
+                    if source == "null" {
+                        sqlx::query(
+                            "UPDATE config SET value = NULL WHERE key = 'isMultiMonitorEnabled'",
+                        )
+                        .execute(&legacy)
+                        .await
+                        .unwrap();
+                    } else if source == "no-table" {
+                        sqlx::query("DROP TABLE config")
+                            .execute(&legacy)
+                            .await
+                            .unwrap();
+                    }
+                    legacy.close().await;
+                }
+            }
+
+            // When import fails and startup continues with canonical settings.
+            assert!(profile.migrate(&canonical).await.is_err(), "{source}");
+            let scheduler = profile.scheduler();
+            scheduler
+                .prepare_settings(&profile.legacy_path())
+                .await
+                .unwrap();
+
+            // Then the old file is retained and explicit recovery seals the new choice.
+            assert_eq!(
+                monitor_choice(&canonical).await,
+                ("true".into(), None),
+                "{source}"
+            );
+            assert!(scheduler.state().unwrap().settings.is_multi_monitor_enabled);
+            assert!(profile.legacy_path().exists());
+            super::save_multi_monitor_preference(&canonical, false)
+                .await
+                .unwrap();
+            profile.migrate(&canonical).await.unwrap();
+            assert_eq!(
+                monitor_choice(&canonical).await,
+                ("false".into(), Some("1".into()))
+            );
+            scheduler.refresh_settings().await.unwrap();
+            assert!(!scheduler.state().unwrap().settings.is_multi_monitor_enabled);
+            canonical.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_monitor_migration_never_overwrites_completed_or_explicit_choices() {
+        for save_first in [false, true] {
+            // Given an unmarked profile with an old true selection.
+            let profile = ConfigProfile::new();
+            let legacy = profile.legacy("true").await;
+            let canonical = profile.canonical("false").await;
+
+            // When a user saves before import, or after a successful import.
+            if !save_first {
+                profile.migrate(&canonical).await.unwrap();
+            }
+            super::save_multi_monitor_preference(&canonical, false)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE config SET value = 'invalid' WHERE key = 'isMultiMonitorEnabled'")
+                .execute(&legacy)
+                .await
+                .unwrap();
+            legacy.close().await;
+            profile.migrate(&canonical).await.unwrap();
+
+            // Then future startup skips even an invalid legacy source.
+            assert_eq!(
+                monitor_choice(&canonical).await,
+                ("false".into(), Some("1".into()))
+            );
+            canonical.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_monitor_migration_rolls_back_value_and_marker_on_write_or_commit_failure() {
+        for failure in ["write", "commit"] {
+            // Given a real SQLite failure after writing the preference.
+            let profile = ConfigProfile::new();
+            let legacy = profile.legacy("true").await;
+            let canonical = profile.canonical("false").await;
+            let sql = if failure == "write" {
+                "CREATE TRIGGER reject_marker BEFORE INSERT ON config
+                 WHEN NEW.key = 'multiMonitorPreferenceMigrationVersion'
+                 BEGIN SELECT RAISE(ABORT, 'test marker failure'); END;"
+            } else {
+                "CREATE TABLE accepted_versions (version TEXT PRIMARY KEY);
+                 CREATE TABLE migration_audit (
+                   version TEXT REFERENCES accepted_versions(version) DEFERRABLE INITIALLY DEFERRED
+                 );
+                 CREATE TRIGGER reject_marker AFTER INSERT ON config
+                 WHEN NEW.key = 'multiMonitorPreferenceMigrationVersion'
+                 BEGIN INSERT INTO migration_audit VALUES (NEW.value); END;"
+            };
+            sqlx::raw_sql(sql).execute(&canonical).await.unwrap();
+
+            // When migration and explicit save encounter the failing statement or commit.
+            assert!(profile.migrate(&canonical).await.is_err(), "{failure}");
+            assert_eq!(
+                monitor_choice(&canonical).await,
+                ("false".into(), None),
+                "{failure}"
+            );
+            assert!(super::save_multi_monitor_preference(&canonical, true)
+                .await
+                .is_err());
+
+            // Then neither operation exposes a split value/marker, and recovery can retry.
+            assert_eq!(
+                monitor_choice(&canonical).await,
+                ("false".into(), None),
+                "{failure}"
+            );
+            sqlx::query("DROP TRIGGER reject_marker")
+                .execute(&canonical)
+                .await
+                .unwrap();
+            profile.migrate(&canonical).await.unwrap();
+            assert_eq!(
+                monitor_choice(&canonical).await,
+                ("true".into(), Some("1".into()))
+            );
+            canonical.close().await;
+            legacy.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_monitor_migration_serializes_both_startup_and_save_orderings() {
+        for migration_first in [true, false] {
+            // Given two independent canonical pools and a held SQLite writer transaction.
+            let profile = ConfigProfile::new();
+            let legacy = profile.legacy("true").await;
+            let canonical = profile.canonical("false").await;
+            let other = profile
+                .scheduler()
+                .open_sqlite_pool("appconfig.db", true)
+                .await
+                .unwrap();
+            let mut writer = canonical.begin_with("BEGIN IMMEDIATE").await.unwrap();
+            if migration_first {
+                super::migrate_multi_monitor_transaction(
+                    &mut writer,
+                    &profile.canonical_path(),
+                    &profile.legacy_path(),
+                )
+                .await
+                .unwrap();
+            } else {
+                super::write_multi_monitor_choice(&mut writer, Some(false))
+                    .await
+                    .unwrap();
+            }
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let canonical_path = profile.canonical_path();
+            let legacy_path = profile.legacy_path();
+            let contender_pool = other.clone();
+            let mut contenders = tokio::task::JoinSet::new();
+            contenders.spawn(async move {
+                started.send(()).unwrap();
+                if migration_first {
+                    super::save_multi_monitor_preference(&contender_pool, false).await
+                } else {
+                    super::migrate_multi_monitor_preference(
+                        &contender_pool,
+                        &canonical_path,
+                        &legacy_path,
+                    )
+                    .await
+                }
+            });
+
+            // When the second writer starts while the first has not committed.
+            tokio::time::timeout(super::Duration::from_secs(5), ready)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(monitor_choice(&other).await, ("false".into(), None));
+            writer.commit().await.unwrap();
+            tokio::time::timeout(super::Duration::from_secs(5), contenders.join_next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .unwrap();
+
+            // Then migration-before-save and save-before-migration both retain the explicit choice.
+            assert_eq!(
+                monitor_choice(&other).await,
+                ("false".into(), Some("1".into()))
+            );
+            assert_eq!(
+                monitor_choice(&canonical).await,
+                monitor_choice(&other).await
+            );
+            other.close().await;
+            canonical.close().await;
+            legacy.close().await;
+        }
+    }
 
     fn actual_session() -> super::ReminderSession {
         super::ReminderSession {
