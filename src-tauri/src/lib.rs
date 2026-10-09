@@ -285,6 +285,24 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = _event
+            {
+                if let Some(window) = _app.get_webview_window("main") {
+                    if let Err(error) = window
+                        .show()
+                        .and_then(|_| window.unminimize())
+                        .and_then(|_| window.set_focus())
+                    {
+                        eprintln!("[Window] Dock restoration failed: {error}");
+                    }
+                }
+            }
+        });
 }
